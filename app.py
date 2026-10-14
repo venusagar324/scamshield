@@ -1,579 +1,624 @@
 
-import re
-from urllib.parse import urlparse
 import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+from scam_engine import analyze_message
+
+# Optional screenshot OCR packages
+try:
+    from PIL import Image
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
 
 # ---------------- PAGE CONFIGURATION ----------------
 st.set_page_config(
-    page_title="ScamShield",
+    page_title="ScamShield | Scam Detection",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ---------------- CUSTOM DESIGN ----------------
+
+# ---------------- LIGHT THEME CSS ----------------
 st.markdown("""
 <style>
+/* Main application background */
 .stApp {
-    background: linear-gradient(135deg, #eef2ff, #ffffff);
+    background: linear-gradient(135deg, #edf6ff 0%, #f8fbff 55%, #eaf2ff 100%);
+    color: #172b4d;
 }
+
+/* Main content */
 .block-container {
-    max-width: 1100px;
     padding-top: 2rem;
+    padding-bottom: 2rem;
+    max-width: 1450px;
 }
+
+/* General text visibility */
+html, body, [class*="css"] {
+    color: #172b4d;
+}
+
+p, label, li, .stMarkdown {
+    color: #243b53;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: #dcecff;
+    border-right: 1px solid #bfd7f5;
+}
+
+section[data-testid="stSidebar"] * {
+    color: #17365d !important;
+}
+
+/* Headings */
+h1, h2, h3 {
+    color: #123c69 !important;
+    font-weight: 750 !important;
+}
+
+/* Metric cards */
+div[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #c8ddf5;
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 4px 12px rgba(29, 78, 137, 0.08);
+}
+
+div[data-testid="stMetricLabel"] {
+    color: #405d7a !important;
+}
+
+div[data-testid="stMetricValue"] {
+    color: #123c69 !important;
+}
+
+/* Buttons */
+.stButton > button,
+.stDownloadButton > button {
+    background: #1769aa;
+    color: #ffffff !important;
+    border: none;
+    border-radius: 9px;
+    padding: 0.55rem 1rem;
+    font-weight: 650;
+    transition: 0.2s;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    background: #104e85;
+    color: #ffffff !important;
+    border: none;
+}
+
+/* Inputs */
+.stTextArea textarea,
+.stTextInput input,
+.stSelectbox div[data-baseweb="select"],
+.stDateInput input {
+    background: #ffffff !important;
+    color: #172b4d !important;
+    border: 1px solid #a9c8eb !important;
+    border-radius: 9px !important;
+}
+
+/* File uploader */
+div[data-testid="stFileUploader"] {
+    background: #ffffff;
+    border: 1px dashed #8bb5e8;
+    border-radius: 12px;
+    padding: 12px;
+}
+
+/* Tables */
+div[data-testid="stDataFrame"] {
+    background: #ffffff;
+    border: 1px solid #c8ddf5;
+    border-radius: 10px;
+}
+
+/* App banner */
 .hero {
-    background: linear-gradient(120deg, #101a35, #3155a6);
-    padding: 35px;
-    border-radius: 20px;
-    color: white;
-    text-align: center;
+    background: linear-gradient(120deg, #d8ebff, #ffffff);
+    padding: 26px;
+    border: 1px solid #bfd8f5;
+    border-radius: 18px;
+    margin-bottom: 24px;
+    box-shadow: 0 5px 18px rgba(29, 78, 137, 0.08);
 }
+
 .hero h1 {
-    color: white;
-    font-size: 44px;
+    color: #123c69;
+    margin-bottom: 8px;
 }
+
 .hero p {
-    color: #e0e7ff;
-    font-size: 18px;
+    color: #405d7a;
+    font-size: 16px;
 }
-.card {
-    background: white;
-    padding: 20px;
-    border-radius: 15px;
-    border: 1px solid #e2e8f0;
+
+/* Information cards */
+.info-card {
+    background: #ffffff;
+    border: 1px solid #d0e1f5;
+    border-radius: 13px;
+    padding: 18px;
     margin-bottom: 12px;
+    box-shadow: 0 3px 10px rgba(29, 78, 137, 0.05);
+}
+
+/* Footer */
+.footer {
+    color: #526d8a;
+    text-align: center;
+    font-size: 13px;
+    padding: 18px 0;
+}
+
+/* Progress bar */
+div[data-testid="stProgressBar"] > div > div {
+    background-color: #1769aa;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- SCAM DETECTION RULES ----------------
 
-FEE_WORDS = [
-    "registration fee",
-    "processing fee",
-    "security deposit",
-    "training fee",
-    "upfront payment",
-    "refundable fee",
-    "pay to confirm",
-    "pay to secure",
-    "interview fee"
-]
-
-URGENCY_WORDS = [
-    "urgent",
-    "immediately",
-    "act now",
-    "today only",
-    "limited slots",
-    "last chance",
-    "confirm today",
-    "expires today"
-]
-
-SENSITIVE_WORDS = [
-    "share your otp",
-    "send your otp",
-    "otp for verification",
-    "one-time password",
-    "share your password",
-    "send your password",
-    "share your pin",
-    "login credentials"
-]
-
-JOB_WORDS = [
-    "job offer",
-    "selected for a job",
-    "work from home",
-    "guaranteed job",
-    "joining letter",
-    "recruitment",
-    "job vacancy"
-]
-
-PHISHING_WORDS = [
-    "account will be blocked",
-    "verify your account",
-    "account is suspended",
-    "update your kyc",
-    "claim your prize",
-    "click here to verify",
-    "verify your bank account"
-]
-
-SHORTENERS = [
-    "bit.ly",
-    "tinyurl.com",
-    "t.co",
-    "cutt.ly",
-    "rb.gy",
-    "is.gd",
-    "shorturl.at",
-    "ow.ly"
-]
-
-SUSPICIOUS_EXTENSIONS = [
-    ".zip",
-    ".click",
-    ".top",
-    ".work",
-    ".gq",
-    ".tk"
-]
+# ---------------- SESSION STATE ----------------
+if "scan_history" not in st.session_state:
+    st.session_state.scan_history = []
 
 
-def extract_urls(text):
-    """Extract URLs without opening or visiting them."""
-
-    pattern = (
-        r'(?i)\b(?:https?://|www\.)[^\s<>"\']+'
-        r'|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}'
-        r'(?:/[^\s<>"\']*)?'
-    )
-
-    urls = re.findall(pattern, text)
-    results = []
-
-    for url in urls:
-        url = url.rstrip(".,;:!?)]}")
-
-        normalized = url
-        if normalized.lower().startswith("www."):
-            normalized = "http://" + normalized
-        elif not normalized.lower().startswith(
-            ("http://", "https://")
-        ):
-            normalized = "http://" + normalized
-
-        parsed = urlparse(normalized)
-        domain = parsed.hostname or ""
-
-        # Ignore malformed and non-domain values.
-        if "." in domain and " " not in domain:
-            results.append({
-                "url": url,
-                "domain": domain.lower()
-            })
-
-    return results
+# ---------------- HELPER FUNCTIONS ----------------
+def save_scan(message, result, scan_type="Message"):
+    """Save a scan in the current browser session."""
+    st.session_state.scan_history.append({
+        "Date and Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Scan Type": scan_type,
+        "Message": message,
+        "Risk Score": result.get("score", 0),
+        "Risk Level": result.get("level", "Unknown"),
+        "Categories": ", ".join(result.get("categories", []))
+    })
 
 
-def analyze_message(message):
-    """Detect warning signs using transparent rules."""
+def show_analysis(message, result):
+    """Display the scam analysis results."""
+    score = max(0, min(100, int(result.get("score", 0))))
+    level = str(result.get("level", "Unknown"))
 
-    text = message.lower()
-    signals = []
-    score = 0
+    st.markdown("---")
+    st.subheader("🔎 Analysis Results")
 
-    def add_signal(title, explanation, points):
-        nonlocal score
+    col1, col2 = st.columns(2)
+    col1.metric("Risk Score", f"{score}/100")
+    col2.metric("Risk Level", level)
 
-        signals.append({
-            "title": title,
-            "explanation": explanation,
-            "points": points
-        })
-        score += points
+    st.progress(score / 100)
 
-    # Check for payment requests.
-    if any(word in text for word in FEE_WORDS):
-        add_signal(
-            "💸 Upfront payment request",
-            "The message mentions a fee or payment to obtain "
-            "or confirm an opportunity. Verify the employer "
-            "before paying anything.",
-            4
+    if level.lower() in ("critical", "high"):
+        st.error(
+            "⚠️ High risk: suspicious warning signs were detected. "
+            "Do not send money or share OTPs/passwords."
         )
-
-    # Check for urgent language.
-    if any(word in text for word in URGENCY_WORDS):
-        add_signal(
-            "⏰ Urgency or pressure",
-            "The message may be pressuring you to act quickly. "
-            "Take time to verify it independently.",
-            2
-        )
-
-    # Check for OTP/password requests.
-    if any(word in text for word in SENSITIVE_WORDS):
-        add_signal(
-            "🔐 Sensitive information warning",
-            "Never share OTPs, passwords, PINs, or login "
-            "credentials with unexpected contacts.",
-            4
-        )
-
-    # Check for job-related messages.
-    if any(word in text for word in JOB_WORDS):
-        add_signal(
-            "💼 Job or recruitment message",
-            "This message discusses a job opportunity. "
-            "Check the company and recruiter through "
-            "official channels.",
-            1
-        )
-
-    # Check for common phishing language.
-    if any(word in text for word in PHISHING_WORDS):
-        add_signal(
-            "🎣 Possible phishing language",
-            "Unexpected account verification, KYC, or prize "
-            "messages may lead to fake websites.",
-            3
-        )
-
-    # Inspect URLs as text only.
-    urls = extract_urls(message)
-
-    for item in urls:
-        domain = item["domain"]
-
-        if any(domain == s or domain.endswith("." + s)
-               for s in SHORTENERS):
-            add_signal(
-                "🔗 Shortened URL detected",
-                "Shortened links hide their final destination. "
-                "Check the destination independently.",
-                2
-            )
-
-        if any(domain.endswith(ext)
-               for ext in SUSPICIOUS_EXTENSIONS):
-            add_signal(
-                "🌐 Unusual domain extension",
-                "This domain extension deserves extra checking. "
-                "An unusual extension alone does not prove a scam.",
-                2
-            )
-
-        if domain.startswith("xn--") or ".xn--" in domain:
-            add_signal(
-                "🌐 Encoded domain detected",
-                "Encoded domain names can sometimes disguise "
-                "look-alike websites.",
-                2
-            )
-
-        if domain.count("-") >= 3 or len(domain) > 35:
-            add_signal(
-                "🔎 Unusual domain structure",
-                "The domain is long or contains many hyphens. "
-                "Verify that it matches the official website.",
-                1
-            )
-
-    # Remove duplicate warning titles.
-    unique_signals = []
-    seen = set()
-
-    for signal in signals:
-        if signal["title"] not in seen:
-            unique_signals.append(signal)
-            seen.add(signal["title"])
-
-    signals = unique_signals
-    score = sum(signal["points"] for signal in signals)
-
-    # Determine risk level.
-    if score >= 6:
-        level = "HIGH"
-        color = "#dc2626"
-        summary = (
-            "Several warning signs were detected. "
-            "Do not pay or share sensitive information "
-            "until you verify the sender."
-        )
-    elif score >= 3:
-        level = "CAUTION"
-        color = "#d97706"
-        summary = (
-            "Some warning signs were detected. "
-            "Pause and verify the message independently."
+    elif level.lower() == "medium":
+        st.warning(
+            "⚠️ Medium risk: check the sender and verify the message "
+            "through an independent, trusted source."
         )
     else:
-        level = "LOW"
-        color = "#15803d"
-        summary = (
-            "Few configured warning signs were detected. "
-            "This does not prove the message is safe."
-        )
-
-    return {
-        "score": score,
-        "level": level,
-        "color": color,
-        "summary": summary,
-        "signals": signals,
-        "urls": urls
-    }
-
-
-# ---------------- HEADER ----------------
-
-st.markdown("""
-<div class="hero">
-    <h1>🛡️ ScamShield</h1>
-    <p>Pause Before You Pay. Check Before You Trust.</p>
-    <p>Explainable Phishing &amp; Job-Scam Checker</p>
-</div>
-""", unsafe_allow_html=True)
-
-st.write("")
-
-st.info(
-    "ScamShield checks messages for possible warning signs "
-    "and explains why they matter. It does not guarantee "
-    "that a message is genuine or fraudulent."
-)
-
-# ---------------- SIDEBAR ----------------
-
-with st.sidebar:
-    st.title("🛡️ ScamShield")
-    st.write("Your first step toward safer online decisions.")
-
-    st.divider()
-
-    st.subheader("Features")
-    st.write("✅ Job-scam warning checks")
-    st.write("✅ Phishing-language detection")
-    st.write("✅ URL text inspection")
-    st.write("✅ Explainable risk score")
-    st.write("✅ Safety recommendations")
-
-    st.divider()
-
-    st.subheader("Safety tips")
-    st.write("🔐 Never share OTPs or passwords.")
-    st.write("💸 Do not pay to secure a job.")
-    st.write("🔗 Do not open suspicious links.")
-    st.write("🏢 Verify recruiters through official websites.")
-
-    st.caption(
-        "Privacy: this application does not intentionally "
-        "save submissions to a database."
-    )
-
-# ---------------- MAIN INPUT ----------------
-
-st.header("🔍 Analyze a Suspicious Message")
-
-st.write(
-    "Paste a suspicious SMS, email, recruitment message, "
-    "or website URL below."
-)
-
-demo_message = (
-    "Congratulations! You are selected for a job. "
-    "Pay a registration fee today to confirm your offer. "
-    "Reply with your OTP for verification."
-)
-
-if "message_text" not in st.session_state:
-    st.session_state.message_text = ""
-
-def load_demo():
-    st.session_state.message_text = demo_message
-
-message = st.text_area(
-    "Message or URL",
-    key="message_text",
-    height=200,
-    placeholder=(
-        "Paste your suspicious message here..."
-    )
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-    analyze_clicked = st.button(
-        "🔎 Analyze Message",
-        type="primary",
-        use_container_width=True
-    )
-
-with col2:
-    st.button(
-        "📝 Load Demo Example",
-        on_click=load_demo,
-        use_container_width=True
-    )
-
-# ---------------- ANALYSIS RESULTS ----------------
-
-if analyze_clicked:
-
-    if not message.strip():
-        st.warning("Please enter a message or URL first.")
-
-    else:
-        result = analyze_message(message)
-
-        st.divider()
-        st.header("📊 Analysis Report")
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Risk Level",
-            result["level"]
-        )
-
-        c2.metric(
-            "Warning Signals",
-            len(result["signals"])
-        )
-
-        c3.metric(
-            "Rule Score",
-            result["score"]
-        )
-
-        st.markdown(
-            f"""
-            <div style="
-                background:white;
-                border-left:7px solid {result['color']};
-                padding:20px;
-                border-radius:12px;
-                margin:15px 0;
-                border-top:1px solid #e5e7eb;
-                border-right:1px solid #e5e7eb;
-                border-bottom:1px solid #e5e7eb;
-            ">
-                <h3 style="color:{result['color']}">
-                    {result['level']} RISK ASSESSMENT
-                </h3>
-                <p>{result['summary']}</p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        # Display detected warning signs.
-        st.subheader("🚩 Warning Signals Detected")
-
-        if result["signals"]:
-
-            for signal in result["signals"]:
-                with st.container(border=True):
-                    st.markdown(
-                        f"**{signal['title']}**"
-                    )
-                    st.write(signal["explanation"])
-                    st.caption(
-                        f"Rule score: {signal['points']}"
-                    )
-
-        else:
-            st.success(
-                "No configured warning rules were triggered. "
-                "Still verify the sender before trusting "
-                "the message."
-            )
-
-        # Display URLs without opening them.
-        st.subheader("🌐 URL Inspection")
-
-        if result["urls"]:
-            st.warning(
-                "These URLs were inspected as text only. "
-                "ScamShield does not open them."
-            )
-
-            for item in result["urls"]:
-                st.code(
-                    f"URL: {item['url']}\n"
-                    f"Domain: {item['domain']}"
-                )
-        else:
-            st.write(
-                "No obvious URL was found in this message."
-            )
-
-        # Recommendations.
-        st.subheader("🛡️ Recommended Safe Actions")
-
-        recommendations = [
-            "Do not pay upfront fees to obtain a job.",
-            "Never share OTPs, passwords, or PINs.",
-            "Visit the organisation's official website "
-            "by typing its address yourself.",
-            "Contact the company using contact details "
-            "published on its official website.",
-            "Do not open suspicious links or attachments."
-        ]
-
-        for item in recommendations:
-            st.markdown(f"- {item}")
-
         st.info(
-            "If you lose money to cyber fraud in India, "
-            "contact your bank immediately and report it "
-            "through helpline 1930 or cybercrime.gov.in."
+            "ℹ️ Few configured warning signs were detected. "
+            "This does not guarantee that the message is safe."
         )
 
-        st.caption(
-            "Disclaimer: ScamShield is a rule-based "
-            "educational prototype. It can miss scams or "
-            "flag legitimate messages. The score is guidance, "
-            "not proof."
+    st.subheader("📌 Detected Categories")
+    categories = result.get("categories", [])
+
+    if categories:
+        for category in categories:
+            st.write(f"• {category}")
+    else:
+        st.write("No configured scam category matched.")
+
+    st.subheader("🚩 Warning Phrases")
+    findings = result.get("findings", [])
+
+    if findings:
+        if isinstance(findings, list) and isinstance(findings[0], dict):
+            st.dataframe(
+                pd.DataFrame(findings),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            for finding in findings:
+                st.write(f"• {finding}")
+    else:
+        st.write("No configured warning phrases matched.")
+
+    suspicious_urls = result.get("suspicious_urls", [])
+
+    if suspicious_urls:
+        st.subheader("🔗 Suspicious Links to Review")
+        for url in suspicious_urls:
+            st.write(f"• {url}")
+
+    st.subheader("🛡️ Safety Recommendations")
+    advice = result.get("advice", [])
+
+    if advice:
+        for item in advice:
+            st.write(f"• {item}")
+    else:
+        st.write("Verify the sender before taking action.")
+
+    report = pd.DataFrame([{
+        "Message": message,
+        "Risk Score": score,
+        "Risk Level": level,
+        "Categories": ", ".join(categories),
+        "Date and Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }])
+
+    st.download_button(
+        "⬇️ Download Scan Report",
+        data=report.to_csv(index=False).encode("utf-8"),
+        file_name="scamshield_report.csv",
+        mime="text/csv"
+    )
+
+
+# ---------------- SIDEBAR NAVIGATION ----------------
+with st.sidebar:
+    st.markdown("## 🛡️ ScamShield")
+    st.caption("Smart Scam Detection System")
+    st.markdown("---")
+
+    page = st.radio(
+        "NAVIGATION",
+        [
+            "Dashboard",
+            "Message Scanner",
+            "Screenshot Scanner",
+            "Scan History",
+            "Analytics",
+            "Safety Guide"
+        ],
+        label_visibility="visible"
+    )
+
+    st.markdown("---")
+    st.markdown("### 🔐 Stay Safe Online")
+    st.caption("Stop • Check • Verify")
+    st.caption("Never share your OTP or UPI PIN.")
+
+
+# ---------------- DASHBOARD ----------------
+if page == "Dashboard":
+
+    st.markdown("""
+    <div class="hero">
+        <h1>🛡️ Welcome to ScamShield</h1>
+        <p>
+            Detect suspicious messages, identify common scam warning signs,
+            and learn how to protect yourself online.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    total = len(st.session_state.scan_history)
+
+    high_risk = sum(
+        1 for item in st.session_state.scan_history
+        if str(item["Risk Level"]).lower() in ("high", "critical")
+    )
+
+    avg_score = (
+        sum(item["Risk Score"] for item in st.session_state.scan_history) / total
+        if total else 0
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("📊 Total Scans", total)
+    c2.metric("🚨 High/Critical Risk", high_risk)
+    c3.metric("📈 Average Risk Score", f"{avg_score:.1f}/100")
+
+    st.markdown("## ✨ What can ScamShield do?")
+
+    a, b = st.columns(2)
+
+    with a:
+        st.markdown("""
+        <div class="info-card">
+            <h3>💬 Message Scanner</h3>
+            <p>Check SMS, WhatsApp messages, job offers and other text.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="info-card">
+            <h3>📸 Screenshot Scanner</h3>
+            <p>Upload a message screenshot and extract readable text for analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with b:
+        st.markdown("""
+        <div class="info-card">
+            <h3>📊 Analytics</h3>
+            <p>Review your scan history and see the risk levels detected.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="info-card">
+            <h3>🛡️ Safety Guide</h3>
+            <p>Learn simple ways to identify and avoid common online scams.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.warning(
+        "Important: ScamShield currently checks configured warning patterns. "
+        "It is a supporting tool, not a guarantee that a message is safe."
+    )
+
+
+# ---------------- MESSAGE SCANNER ----------------
+elif page == "Message Scanner":
+
+    st.title("💬 Message Scam Scanner")
+    st.write("Paste a suspicious message below to check for warning signs.")
+
+    message = st.text_area(
+        "Enter message",
+        height=200,
+        placeholder=(
+            "Example: Congratulations! You won a prize. "
+            "Click this link and pay a fee to claim it."
+        )
+    )
+
+    if st.button("🔍 Analyze Message", type="primary"):
+        if not message.strip():
+            st.warning("Please enter a message first.")
+        else:
+            try:
+                result = analyze_message(message)
+                save_scan(message, result, "Message")
+                show_analysis(message, result)
+            except Exception as error:
+                st.error("The message could not be analyzed.")
+                st.caption(f"Technical details: {error}")
+
+
+# ---------------- SCREENSHOT SCANNER ----------------
+elif page == "Screenshot Scanner":
+
+    st.title("📸 Screenshot Scam Scanner")
+    st.write(
+        "Upload a clear screenshot of an SMS, WhatsApp message, "
+        "email, or job offer."
+    )
+
+    if not OCR_AVAILABLE:
+        st.warning(
+            "Screenshot scanning needs Pillow and pytesseract. "
+            "Install them using the commands shown below."
+        )
+        st.code("python -m pip install pillow pytesseract")
+
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload screenshot",
+            type=["png", "jpg", "jpeg"]
         )
 
-# ---------------- SAMPLE TEST CASES ----------------
+        if uploaded_file is not None:
+            try:
+                image = Image.open(uploaded_file).convert("RGB")
+                st.image(
+                    image,
+                    caption="Uploaded screenshot",
+                    use_container_width=True
+                )
 
-st.divider()
-st.header("🧪 Try Sample Messages")
+                if st.button("🔍 Extract Text and Analyze", type="primary"):
+                    with st.spinner("Reading screenshot..."):
+                        try:
+                            extracted_text = pytesseract.image_to_string(
+                                image,
+                                lang="eng+tel"
+                            )
+                        except Exception:
+                            try:
+                                extracted_text = pytesseract.image_to_string(
+                                    image,
+                                    lang="eng"
+                                )
+                                st.warning(
+                                    "Telugu OCR may not be installed. "
+                                    "English text extraction was attempted."
+                                )
+                            except Exception:
+                                st.error(
+                                    "OCR engine not found. Install Tesseract "
+                                    "OCR on your computer and configure its PATH."
+                                )
+                                extracted_text = ""
 
-st.write(
-    "Use these examples to demonstrate the application "
-    "during your hackathon presentation."
-)
+                    if not extracted_text.strip():
+                        st.warning(
+                            "No readable text was found. Try a clearer screenshot."
+                        )
+                    else:
+                        st.subheader("📝 Extracted Text")
+                        st.text_area(
+                            "Review the extracted text",
+                            value=extracted_text,
+                            height=160,
+                            key="extracted_text"
+                        )
 
-with st.expander("Example 1: Suspicious Job Offer"):
-    st.code(demo_message)
-    st.write(
-        "Expected result: HIGH risk because the message "
-        "contains a fee request, urgency, and an OTP-related "
-        "warning."
+                        st.caption(
+                            "OCR may make mistakes. Review the extracted text "
+                            "before relying on the result."
+                        )
+
+                        try:
+                            result = analyze_message(extracted_text)
+                            save_scan(extracted_text, result, "Screenshot")
+                            show_analysis(extracted_text, result)
+                        except Exception as error:
+                            st.error("The extracted text could not be analyzed.")
+                            st.caption(f"Technical details: {error}")
+
+            except Exception:
+                st.error("Could not open this image. Try another PNG or JPEG.")
+
+
+# ---------------- SCAN HISTORY ----------------
+elif page == "Scan History":
+
+    st.title("🕘 Scan History")
+    st.write("Scans are stored for this active app session.")
+
+    history = st.session_state.scan_history
+
+    if history:
+        history_df = pd.DataFrame(history)
+
+        st.dataframe(
+            history_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "⬇️ Download Full History",
+            data=history_df.to_csv(index=False).encode("utf-8"),
+            file_name="scamshield_scan_history.csv",
+            mime="text/csv"
+        )
+
+        if st.button("🗑️ Clear Scan History"):
+            st.session_state.scan_history = []
+            st.rerun()
+
+    else:
+        st.info("No scans yet. Visit Message Scanner to begin.")
+
+
+# ---------------- ANALYTICS ----------------
+elif page == "Analytics":
+
+    st.title("📊 Scam Detection Analytics")
+
+    history = st.session_state.scan_history
+
+    if not history:
+        st.info("Complete a few scans to view analytics.")
+    else:
+        df = pd.DataFrame(history)
+
+        c1, c2 = st.columns(2)
+        c1.metric("Total Scans", len(df))
+        c2.metric("Average Risk Score", f"{df['Risk Score'].mean():.1f}/100")
+
+        st.subheader("Risk Level Distribution")
+        risk_counts = (
+            df["Risk Level"]
+            .value_counts()
+            .rename_axis("Risk Level")
+            .reset_index(name="Number of Scans")
+        )
+
+        st.bar_chart(
+            risk_counts.set_index("Risk Level")["Number of Scans"]
+        )
+
+        st.subheader("Risk Score by Scan")
+        chart_df = df[["Date and Time", "Risk Score"]].copy()
+        chart_df = chart_df.reset_index(drop=True)
+        chart_df.index = chart_df.index + 1
+        chart_df.index.name = "Scan Number"
+
+        st.line_chart(chart_df["Risk Score"])
+
+        st.subheader("Scan Types")
+        st.bar_chart(df["Scan Type"].value_counts())
+
+
+# ---------------- SAFETY GUIDE ----------------
+elif page == "Safety Guide":
+
+    st.title("🛡️ Online Safety Guide")
+    st.write("Follow these tips to protect yourself from common scams.")
+
+    tips = [
+        (
+            "💳 UPI and Payment Fraud",
+            "Never share your UPI PIN or OTP. You do not need to enter "
+            "your PIN to receive money."
+        ),
+        (
+            "💼 Fake Job Offers",
+            "Be careful if a recruiter demands registration fees, "
+            "security deposits, or payment to guarantee a job."
+        ),
+        (
+            "🔗 Phishing Links",
+            "Do not open unexpected links or enter passwords on unfamiliar "
+            "websites. Check the website address carefully."
+        ),
+        (
+            "🎁 Fake Prizes and Lotteries",
+            "Unexpected prize messages asking for payment or personal "
+            "information are warning signs."
+        ),
+        (
+            "🏦 Bank Impersonation",
+            "If a message claims your account will be blocked, contact "
+            "your bank using its official app or verified contact details."
+        ),
+        (
+            "📱 OTP Safety",
+            "Never share an OTP with someone who calls or messages you."
+        ),
+        (
+            "🚨 Report Suspected Cybercrime",
+            "In India, you can report cybercrime at cybercrime.gov.in. "
+            "For urgent financial cyber fraud, call 1930."
+        )
+    ]
+
+    for title, description in tips:
+        st.markdown(f"""
+        <div class="info-card">
+            <h3>{title}</h3>
+            <p>{description}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.info(
+        "Remember: A low risk score does not prove a message is genuine. "
+        "Always verify important requests independently."
     )
 
-with st.expander("Example 2: Ordinary Interview Notice"):
-    st.code(
-        "Thank you for applying. Please check the interview "
-        "schedule on our company careers page. Our recruitment "
-        "team will contact you with further details."
-    )
-    st.write(
-        "Expected result: Usually LOW risk under the "
-        "configured rules. This is not proof of legitimacy."
-    )
-
-with st.expander("Example 3: Possible Phishing Message"):
-    st.code(
-        "Your account will be blocked today. "
-        "Click here to verify your account immediately."
-    )
-    st.write(
-        "Expected result: CAUTION or HIGH depending on "
-        "the warning rules triggered."
-    )
 
 # ---------------- FOOTER ----------------
-
-st.divider()
-
-st.markdown(
-    """
-    <div style="text-align:center; padding:20px;">
-        <h3>🛡️ ScamShield</h3>
-        <p>DETECT • EXPLAIN • GUIDE</p>
-        <p>Think Before You Click. Verify Before You Pay.</p>
-        <small>
-            Hackathon MVP | Built with Python and Streamlit
-        </small>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("---")
+st.markdown("""
+<div class="footer">
+    🛡️ ScamShield 2.0 | Cybersecurity Awareness Project<br>
+    Light Blue Edition • Rule-based screening • Stay alert, stay safe
+</div>
+""", unsafe_allow_html=True)
